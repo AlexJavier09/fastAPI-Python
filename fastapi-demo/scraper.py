@@ -201,14 +201,37 @@ def make_driver(headless=True, user_agent=None, proxy=None):
 
     if user_agent:
         opts.add_argument(f"--user-agent={user_agent}")
-
     if proxy:
         opts.add_argument(f"--proxy-server={proxy}")
 
-    service = Service(os.getenv("CHROMEDRIVER_BIN", "/usr/bin/chromedriver"))
-    driver = webdriver.Chrome(service=service, options=opts)
-    driver.set_page_load_timeout(40)
-    return driver
+    # 1) Si estamos en Docker Linux con chromedriver del sistema, úsalo
+    chromedriver_bin = os.getenv("CHROMEDRIVER_BIN", "/usr/bin/chromedriver")
+    if os.path.isfile(chromedriver_bin):
+        service = Service(chromedriver_bin)
+        driver = webdriver.Chrome(service=service, options=opts)
+        driver.set_page_load_timeout(40)
+        return driver
+
+    # 2) Intento estándar (Selenium Manager) – en macOS suele bastar
+    try:
+        driver = webdriver.Chrome(options=opts)
+        driver.set_page_load_timeout(40)
+        return driver
+    except Exception as e1:
+        print("Selenium Manager falló:", e1)
+
+    # 3) Fallback con webdriver-manager (descarga el driver compatible)
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=opts)
+        driver.set_page_load_timeout(40)
+        return driver
+    except Exception as e2:
+        raise RuntimeError(
+            f"No se pudo inicializar ChromeDriver ni con Selenium Manager ni con webdriver-manager. "
+            f"Detalles:\n- Selenium Manager: {e1}\n- webdriver-manager: {e2}"
+        )
 # --------------------------------------------------------------------------------------
 # Scraper con Selenium
 # --------------------------------------------------------------------------------------
@@ -282,5 +305,5 @@ def save_csv(rows, filename="encuentra24_perfil.csv"):
 
 if __name__ == "__main__":
     USER_ID = 465250
-    rows = scrape_profile(USER_ID, headless=True)
+    rows = scrape_profile(USER_ID)
     save_csv(rows, filename=f"enc24_{USER_ID}.csv")
