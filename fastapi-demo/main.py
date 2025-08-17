@@ -5,5 +5,5 @@ app = FastAPI()
 
 @app.get("/scrape")
 def scrape(user_id: int = 465250):
-    rows = scrape_profile(user_id=user_id, headless=True)
+    rows = scrape_profile(user_id=user_id)
     return rows
