@@ -1,4 +1,18 @@
-fastapi
-uvicorn
-requests
-lxml
+# Paquetes principales
+fastapi==0.103.1
+uvicorn==0.23.2
+
+# Scraping básico
+requests==2.31.0
+lxml==4.9.3
+
+# Anti-bloqueo (ESSENCIAL)
+curl-cffi==0.5.10  # Para evadir detección de requests
+fake-useragent==1.3.0  # Rotación automática de User-Agents
+
+# Proxies (opcional)
+python-socks[asyncio]==2.3.0  # Si usas proxies SOCKS
+requests[socks]==2.31.0  # Soporte para proxies en requests
+
+# Manejo de tiempos
+python-multipart
