@@ -1,42 +1,35 @@
 import csv
 import re
 import time
-import random
 from urllib.parse import urljoin
-from curl_cffi import requests  # Alternativa anti-bloqueo
+
 from lxml import html
 
-# --- Configuración Base ---
+# --- Selenium ---
+import os
+from selenium.webdriver.chrome.service import Service
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+
 BASE = "https://www.encuentra24.com"
 PROFILE_URL_TMPL = BASE + "/costa-rica-es/user/profile/id/{user_id}?page={page}"
 
-# --- Headers Avanzados ---
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/120.0",
-]
-
-DEFAULT_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-    "Referer": "https://www.encuentra24.com/",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "same-origin",
-    "Upgrade-Insecure-Requests": "1"
-}
-
-# --- Configuración CSV ---
 CSV_HEADERS = [
     "id", "titulo", "ubicacion", "descripcion", "link",
     "precio", "moneda", "area", "habitaciones", "banos",
     "operacion", "propiedad"
 ]
 
-# --- Funciones de Soporte ---
+# --------------------------------------------------------------------------------------
+# Utilidades de limpieza / normalización (idénticas a tu script original)
+# --------------------------------------------------------------------------------------
+
 def detect_moneda(precio_text):
-    t = precio_text.lower()
+    t = (precio_text or "").lower()
     if "$" in t or "usd" in t or "us$" in t:
         return "USD"
     if "₡" in t or "crc" in t or "colones" in t:
@@ -49,17 +42,12 @@ def norm_space(s):
     return re.sub(r"\s+", " ", s or "").strip()
 
 def clean_precio(precio_text):
-    match = re.search(r'[\d\.,]+', precio_text)
+    match = re.search(r'[\d\.,]+', precio_text or "")
     return match.group(0) if match else ""
 
 def clean_area(area_text):
-    match = re.search(r'\d+', area_text.replace(",", ""))
+    match = re.search(r'\d+', (area_text or "").replace(",", ""))
     return match.group(0) if match else ""
-
-def get_details_list_texts(tile):
-    lis = tile.xpath('.//ul[contains(@class,"d3-ad-tile__details")]/li')
-    texts = [norm_space(li.xpath('string(.)')) for li in lis]
-    return texts
 
 def extract_operacion_propiedad(href_path):
     operacion = ""
@@ -79,7 +67,6 @@ def extract_operacion_propiedad(href_path):
         seg2 = segment.replace("bienes-raices-", "")
         seg2 = seg2.replace("alquiler-", "").replace("venta-", "")
 
-        # Palabras que ignoraremos
         ignorar = {
             "de", "propiedades", "amueblados", "amueblado",
             "lujo", "linea", "blanca", "moderno", "nuevo",
@@ -107,6 +94,11 @@ def extract_operacion_propiedad(href_path):
 
     return operacion, propiedad
 
+def get_details_list_texts(tile):
+    # Usamos lxml como antes (page_source -> lxml.html)
+    lis = tile.xpath('.//ul[contains(@class,"d3-ad-tile__details")]/li')
+    texts = [norm_space(li.xpath('string(.)')) for li in lis]
+    return texts
 
 def parse_tile(tile):
     titulo = norm_space("".join(tile.xpath('.//span[contains(@class,"d3-ad-tile__title")]/text()')))
@@ -144,110 +136,128 @@ def parse_tile(tile):
         "propiedad": propiedad,
     }
 
+# --------------------------------------------------------------------------------------
+# Selenium setup
+# --------------------------------------------------------------------------------------
 
-# --- Función Principal Mejorada ---
-def scrape_profile(user_id, delay=4.0, max_pages=20, headers=None, use_proxy=False):
-    try:
-        from curl_cffi import requests  # Importación local para mejor manejo de errores
-        
-        # 1. Configuración inicial
-        browser_version = "chrome100"  # Versión más reciente soportada
-        all_rows = []
-        
-        # 2. Configuración de headers
-        if headers is None:
-            headers = {
-                "User-Agent": random.choice(USER_AGENTS),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-                "Referer": BASE,
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "same-origin",
-                "Upgrade-Insecure-Requests": "1"
-            }
+DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0 Safari/537.36"
+)
 
-        # 3. Configuración de sesión con curl_cffi
-        session = requests.Session()
-        
-        # 4. Visita inicial para establecer cookies
-        print("🔹 Realizando visita inicial para establecer cookies...")
-        session.get(
-            BASE,
-            headers=headers,
-            impersonate=browser_version,
-            timeout=30
-        )
-        time.sleep(random.uniform(2, 3))  # Delay humano
+def make_driver(headless=True, user_agent=DEFAULT_UA, proxy=None):
+    """
+    Crea y devuelve un Chrome headless (o visible) con opciones razonables.
+    - Si pasas proxy="http://user:pass@host:port" lo aplica.
+    """
+    opts = Options()
+    if headless:
+        opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument(f"--user-agent={user_agent}")
+    opts.add_argument("--lang=es-ES,es;q=0.9,en;q=0.8")
+    if proxy:
+        opts.add_argument(f"--proxy-server={proxy}")
 
-        # 5. Scrapeo de páginas
-        page = 1
-        while page <= max_pages:
-            url = PROFILE_URL_TMPL.format(user_id=user_id, page=page)
-            print(f"➡️ Página {page}: {url}")
-            
-            try:
-                # Request con protección anti-bloqueo
-                r = session.get(
-                    url,
-                    headers=headers,
-                    impersonate=browser_version,
-                    timeout=30
-                )
-                
-                # Verificación de respuesta
-                if r.status_code != 200:
-                    print(f"⚠️ HTTP {r.status_code} - Posible bloqueo")
-                    if r.status_code == 403:
-                        print("🔸 Solución: Intenta con proxies o aumenta el delay")
-                    break
+    # Importante para algunos hostings/containers con poca memoria compartida
+    # y para evitar bloqueos por automation flags
+    opts.add_argument("--disable-blink-features=AutomationControlled")
 
-                # Procesamiento del contenido
-                doc = html.fromstring(r.content)
-                container = doc.xpath('//*[@id="currentlistings"]')
-                
-                if not container:
-                    print("⚠️ Contenedor principal no encontrado - ¿Cambió la estructura?")
-                    break
+    driver = webdriver.Chrome(options=opts)
+    driver.set_page_load_timeout(40)
+    return driver
 
-                tiles = container[0].xpath('.//div[@data-tracklisting and contains(@class,"d3-ad-tile")]')
-                if not tiles:
-                    print("✔️ No hay más anuncios disponibles")
-                    break
+def wait_for_listings(driver, timeout=30):
+    """
+    Espera a que cargue el contenedor #currentlistings y al menos un tile.
+    """
+    WebDriverWait(driver, timeout).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, "#currentlistings"))
+    )
+    WebDriverWait(driver, timeout).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, "#currentlistings .d3-ad-tile"))
+    )
 
-                # Procesar cada anuncio
-                for tile in tiles:
-                    try:
-                        row = parse_tile(tile)
-                        row["id"] = len(all_rows) + 1
-                        all_rows.append(row)
-                    except Exception as tile_error:
-                        print(f"⚠️ Error procesando anuncio: {tile_error}")
-                        continue
+def smart_scroll(driver, steps=4, pause=0.8):
+    """
+    Scrollea para disparar lazyloads si fuera necesario.
+    """
+    for _ in range(steps):
+        driver.execute_script("window.scrollBy(0, document.body.scrollHeight/2);")
+        time.sleep(pause)
 
-                # Control de paginación
-                if len(tiles) < 20:
-                    print(f"✔️ Última página detectada (con {len(tiles)} anuncios)")
-                    break
+def make_driver(headless=True, user_agent=None, proxy=None):
+    opts = Options()
+    if headless:
+        opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--lang=es-ES,es;q=0.9,en;q=0.8")
 
-                page += 1
-                current_delay = random.uniform(delay, delay * 1.5)
-                print(f"⏳ Esperando {current_delay:.1f} segundos...")
-                time.sleep(current_delay)
-                
-            except Exception as page_error:
-                print(f"⚠️ Error crítico en página {page}: {str(page_error)}")
-                break
+    if user_agent:
+        opts.add_argument(f"--user-agent={user_agent}")
 
-        return all_rows
+    if proxy:
+        opts.add_argument(f"--proxy-server={proxy}")
 
-    except ImportError:
-        print("❌ curl_cffi no instalado. Ejecuta: pip install curl-cffi")
-        return []
-    except Exception as global_error:
-        print(f"❌ Error global: {str(global_error)}")
-        return []
+    service = Service(os.getenv("CHROMEDRIVER_BIN", "/usr/bin/chromedriver"))
+    driver = webdriver.Chrome(service=service, options=opts)
+    driver.set_page_load_timeout(40)
+    return driver
+# --------------------------------------------------------------------------------------
+# Scraper con Selenium
+# --------------------------------------------------------------------------------------
 
+def scrape_profile(user_id, delay=1.0, max_pages=200):
+    all_rows = []
+    counter = 1
+    page = 1
+
+    driver = make_driver(headless=True)
+
+    while page <= max_pages:
+        url = PROFILE_URL_TMPL.format(user_id=user_id, page=page)
+        print(f"➡️ Página {page}: {url}")
+
+        try:
+            driver.get(url)
+            time.sleep(2)  # deja que la página cargue JS
+            doc = html.fromstring(driver.page_source)
+        except Exception as e:
+            print(f"⚠️ Error cargando {url}: {e}")
+            break
+
+        container = doc.xpath('//*[@id="currentlistings"]')
+        if not container:
+            print("⚠️ No se encontró #currentlistings. Detengo.")
+            break
+        container = container[0]
+
+        tiles = container.xpath('.//div[@data-tracklisting and contains(@class,"d3-ad-tile")]')
+        if not tiles:
+            print("✔️ Sin más anuncios en esta página. Fin.")
+            break
+
+        for tile in tiles:
+            row = parse_tile(tile)
+            row["id"] = counter
+            all_rows.append(row)
+            counter += 1
+
+        if len(tiles) < 20:
+            print(f"✔️ Página {page} con {len(tiles)} anuncios (<20). Fin.")
+            break
+
+        page += 1
+        time.sleep(delay)
+
+    driver.quit()
+    return all_rows
 
 def save_csv(rows, filename="encuentra24_perfil.csv"):
     with open(filename, "w", newline="", encoding="utf-8") as f:
@@ -272,5 +282,5 @@ def save_csv(rows, filename="encuentra24_perfil.csv"):
 
 if __name__ == "__main__":
     USER_ID = 465250
-    rows = scrape_profile(USER_ID)
+    rows = scrape_profile(USER_ID, headless=True)
     save_csv(rows, filename=f"enc24_{USER_ID}.csv")
