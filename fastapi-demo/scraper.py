@@ -189,6 +189,15 @@ def smart_scroll(driver, steps=4, pause=0.8):
         driver.execute_script("window.scrollBy(0, document.body.scrollHeight/2);")
         time.sleep(pause)
 
+def dump_debug(driver, page):
+    """Guarda el HTML actual de Selenium para inspección manual."""
+    try:
+        with open(f"/app/debug_p{page}.html", "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        print(f"🧪 Dump guardado: /app/debug_p{page}.html")
+    except Exception as e:
+        print("No pude guardar dump:", e)
+
 def make_driver(headless=True, user_agent=None, proxy=None):
     opts = Options()
     if headless:
@@ -256,9 +265,11 @@ def scrape_profile(user_id, delay=1.0, max_pages=200):
             break
 
         container = doc.xpath('//*[@id="currentlistings"]')
-        if not container:
-            print("⚠️ No se encontró #currentlistings. Detengo.")
+        if not listings_elem:
+            dump_debug(driver, page)
+            print("⚠️ No se encontró #currentlistings. Dump guardado para inspección.")
             break
+
         container = container[0]
 
         tiles = container.xpath('.//div[@data-tracklisting and contains(@class,"d3-ad-tile")]')
