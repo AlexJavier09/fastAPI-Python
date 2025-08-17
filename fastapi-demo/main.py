@@ -5,7 +5,7 @@ app = FastAPI()
 
 @app.get("/scrape")
 def scrape(user_id: int = 465250, headless: bool = True):
-    rows = scrape_profile(user_id=user_id, headless=headless)
+    rows = scrape_profile(user_id=user_id)
     if not rows:
         raise HTTPException(status_code=502, detail="No se cargaron listings (#currentlistings ausente)")
     return rows
