@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from scraper import scrape_profile  # 👈 usa la versión Selenium
+from scraper import scrape_profile, make_driver   # 👈 importa make_driver
 
 app = FastAPI()
 
@@ -20,10 +20,10 @@ def health_which():
 @app.get("/health/selenium")
 def health_selenium():
     try:
-        d = make_driver(headless=True)
+        d = make_driver(headless=True)  # usa tu helper
         d.get("https://httpbin.org/headers")
-        t = d.title
+        title = d.title
         d.quit()
-        return {"ok": True, "title": t}
+        return {"ok": True, "title": title}
     except Exception as e:
         return {"ok": False, "error": str(e)}
