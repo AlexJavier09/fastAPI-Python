@@ -265,9 +265,10 @@ def scrape_profile(user_id, delay=1.0, max_pages=200):
             break
 
         container = doc.xpath('//*[@id="currentlistings"]')
-        if not listings_elem:
-            dump_debug(driver, page)
-            print("⚠️ No se encontró #currentlistings. Dump guardado para inspección.")
+        if not container:
+            # Dump opcional para depurar
+            dump_debug(driver, page)  # si tienes esta función
+            print("⚠️ No se encontró #currentlistings. Detengo.")
             break
 
         container = container[0]
