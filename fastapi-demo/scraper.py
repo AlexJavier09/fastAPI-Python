@@ -151,7 +151,7 @@ def scrape_profile(user_id, delay=4.0, max_pages=20, headers=None, use_proxy=Fal
         from curl_cffi import requests  # Importación local para mejor manejo de errores
         
         # 1. Configuración inicial
-        browser_version = "chrome112"  # Versión más reciente soportada
+        browser_version = "chrome"  # Versión más reciente soportada
         all_rows = []
         
         # 2. Configuración de headers
