@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from Scraper import scrape_profile  # 👈 usa la versión Selenium
+from scraper import scrape_profile  # 👈 usa la versión Selenium
 
 app = FastAPI()
 
