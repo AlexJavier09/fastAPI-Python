@@ -8,14 +8,13 @@ from lxml import html
 BASE = "https://www.encuentra24.com"
 PROFILE_URL_TMPL = BASE + "/costa-rica-es/user/profile/id/{user_id}?page={page}"
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0 Safari/537.36"
-    ),
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-}
+import random
+HEADERS
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/120.0",
+]
 
 CSV_HEADERS = [
     "id", "titulo", "ubicacion", "descripcion", "link",
@@ -133,8 +132,12 @@ def parse_tile(tile):
 
 def scrape_profile(user_id, delay=1.0, max_pages=200, headers=None):
     if headers is None:
-        headers = HEADERS  # Usa los headers por defecto si no se especifican
-    # ... (resto del código)
+        headers = {
+            "User-Agent": random.choice(USER_AGENTS),  # Usa el User-Agent rotativo
+            "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+            "Referer": "https://www.encuentra24.com/",
+        }
+    
     all_rows = []
     counter = 1
     page = 1
@@ -142,10 +145,14 @@ def scrape_profile(user_id, delay=1.0, max_pages=200, headers=None):
     while page <= max_pages:
         url = PROFILE_URL_TMPL.format(user_id=user_id, page=page)
         print(f"➡️ Página {page}: {url}")
-        r = requests.get(url, headers=HEADERS, timeout=20)
+        
+        # ¡CORRECCIÓN CLAVE! Usa el parámetro `headers` (no la variable global HEADERS)
+        r = requests.get(url, headers=headers, timeout=20)  # <<-- Cambia HEADERS por headers
+        
         if r.status_code != 200:
             print(f"⚠️ HTTP {r.status_code} en {url}. Detengo.")
             break
+        # ... (resto del código)
 
         doc = html.fromstring(r.content)
         container = doc.xpath('//*[@id="currentlistings"]')
