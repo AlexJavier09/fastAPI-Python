@@ -146,67 +146,107 @@ def parse_tile(tile):
 
 
 # --- Función Principal Mejorada ---
-def scrape_profile(user_id, delay=3.0, max_pages=200, headers=None, use_proxy=False ):
-    # Implementación con curl_cffi o requests + proxies    
-    session = requests.Session()
-    
-    # Configuración de sesión
-    headers = DEFAULT_HEADERS.copy()
-    headers["User-Agent"] = random.choice(USER_AGENTS)
-    session.headers.update(headers)
-    
-    # Simulación de comportamiento humano
-    session.get(BASE)  # Visita inicial para obtener cookies
-    time.sleep(random.uniform(2, 4))
-    
-    all_rows = []
-    page = 1
-
-    while page <= max_pages:
-        url = PROFILE_URL_TMPL.format(user_id=user_id, page=page)
-        print(f"➡️ Página {page}: {url}")
+def scrape_profile(user_id, delay=4.0, max_pages=20, headers=None, use_proxy=False):
+    try:
+        from curl_cffi import requests  # Importación local para mejor manejo de errores
         
-        try:
-            # Usando curl_cffi para evadir detección
-            r = session.get(
-                url,
-                impersonate="chrome120",  # Fingerprint de Chrome
-                timeout=20
-            )
+        # 1. Configuración inicial
+        browser_version = "chrome116"  # Versión más reciente soportada
+        all_rows = []
+        
+        # 2. Configuración de headers
+        if headers is None:
+            headers = {
+                "User-Agent": random.choice(USER_AGENTS),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+                "Referer": BASE,
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
+                "Upgrade-Insecure-Requests": "1"
+            }
+
+        # 3. Configuración de sesión con curl_cffi
+        session = requests.Session()
+        
+        # 4. Visita inicial para establecer cookies
+        print("🔹 Realizando visita inicial para establecer cookies...")
+        session.get(
+            BASE,
+            headers=headers,
+            impersonate=browser_version,
+            timeout=30
+        )
+        time.sleep(random.uniform(2, 3))  # Delay humano
+
+        # 5. Scrapeo de páginas
+        page = 1
+        while page <= max_pages:
+            url = PROFILE_URL_TMPL.format(user_id=user_id, page=page)
+            print(f"➡️ Página {page}: {url}")
             
-            if r.status_code != 200:
-                print(f"⚠️ HTTP {r.status_code} en {url}. Detengo.")
+            try:
+                # Request con protección anti-bloqueo
+                r = session.get(
+                    url,
+                    headers=headers,
+                    impersonate=browser_version,
+                    timeout=30
+                )
+                
+                # Verificación de respuesta
+                if r.status_code != 200:
+                    print(f"⚠️ HTTP {r.status_code} - Posible bloqueo")
+                    if r.status_code == 403:
+                        print("🔸 Solución: Intenta con proxies o aumenta el delay")
+                    break
+
+                # Procesamiento del contenido
+                doc = html.fromstring(r.content)
+                container = doc.xpath('//*[@id="currentlistings"]')
+                
+                if not container:
+                    print("⚠️ Contenedor principal no encontrado - ¿Cambió la estructura?")
+                    break
+
+                tiles = container[0].xpath('.//div[@data-tracklisting and contains(@class,"d3-ad-tile")]')
+                if not tiles:
+                    print("✔️ No hay más anuncios disponibles")
+                    break
+
+                # Procesar cada anuncio
+                for tile in tiles:
+                    try:
+                        row = parse_tile(tile)
+                        row["id"] = len(all_rows) + 1
+                        all_rows.append(row)
+                    except Exception as tile_error:
+                        print(f"⚠️ Error procesando anuncio: {tile_error}")
+                        continue
+
+                # Control de paginación
+                if len(tiles) < 20:
+                    print(f"✔️ Última página detectada (con {len(tiles)} anuncios)")
+                    break
+
+                page += 1
+                current_delay = random.uniform(delay, delay * 1.5)
+                print(f"⏳ Esperando {current_delay:.1f} segundos...")
+                time.sleep(current_delay)
+                
+            except Exception as page_error:
+                print(f"⚠️ Error crítico en página {page}: {str(page_error)}")
                 break
 
-            doc = html.fromstring(r.content)
-            container = doc.xpath('//*[@id="currentlistings"]')
-            
-            if not container:
-                print("⚠️ No se encontró #currentlistings. Detengo.")
-                break
+        return all_rows
 
-            tiles = container[0].xpath('.//div[@data-tracklisting and contains(@class,"d3-ad-tile")]')
-            if not tiles:
-                print("✔️ Sin más anuncios en esta página. Fin.")
-                break
-
-            for tile in tiles:
-                row = parse_tile(tile)
-                row["id"] = len(all_rows) + 1
-                all_rows.append(row)
-
-            if len(tiles) < 20:
-                print(f"✔️ Página {page} con {len(tiles)} anuncios (<20). Fin.")
-                break
-
-            page += 1
-            time.sleep(random.uniform(delay, delay + 2))  # Delay aleatorio
-            
-        except Exception as e:
-            print(f"⚠️ Error en página {page}: {str(e)}")
-            break
-
-    return all_rows
+    except ImportError:
+        print("❌ curl_cffi no instalado. Ejecuta: pip install curl-cffi")
+        return []
+    except Exception as global_error:
+        print(f"❌ Error global: {str(global_error)}")
+        return []
 
 
 def save_csv(rows, filename="encuentra24_perfil.csv"):
