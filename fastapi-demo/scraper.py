@@ -144,6 +144,7 @@ def parse_tile(tile):
         "propiedad": propiedad,
     }
 
+
 # --- Función Principal Mejorada ---
 def scrape_profile(user_id, delay=3.0, max_pages=200, headers=None, use_proxy=False ):
     # Implementación con curl_cffi o requests + proxies    session = requests.Session()
