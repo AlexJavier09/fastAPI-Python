@@ -131,7 +131,10 @@ def parse_tile(tile):
         "propiedad": propiedad,
     }
 
-def scrape_profile(user_id, delay=1.0, max_pages=200):
+def scrape_profile(user_id, delay=1.0, max_pages=200, headers=None):
+    if headers is None:
+        headers = HEADERS  # Usa los headers por defecto si no se especifican
+    # ... (resto del código)
     all_rows = []
     counter = 1
     page = 1
