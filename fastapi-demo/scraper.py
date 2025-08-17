@@ -196,3 +196,4 @@ if __name__ == "__main__":
     USER_ID = 465250  # <-- cambia aquí el ID del usuario
     rows = scrape_profile(USER_ID)
     save_csv(rows, filename=f"enc24_{USER_ID}.csv")
+
