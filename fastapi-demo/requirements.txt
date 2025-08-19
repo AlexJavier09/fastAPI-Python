@@ -1,11 +1,7 @@
-# Framework API
 fastapi
 uvicorn[standard]
-
-# Scraping y parsing
+undetected-chromedriver
 selenium
 lxml
 requests
-
-# Utilidades
 python-dotenv

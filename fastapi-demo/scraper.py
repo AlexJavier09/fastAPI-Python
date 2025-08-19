@@ -1,19 +1,23 @@
-import csv
+import os
 import re
 import time
+import zipfile
 from urllib.parse import urljoin
 
+import requests
 from lxml import html
 
-# --- Selenium ---
-import os
-from selenium.webdriver.chrome.service import Service
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
+# Selenium (undetected-chromedriver)
+import undetected_chromedriver as uc
+from selenium.webdriver import ChromeOptions
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+
+# ==========================
+# Config base
+# ==========================
 
 BASE = "https://www.encuentra24.com"
 PROFILE_URL_TMPL = BASE + "/costa-rica-es/user/profile/id/{user_id}?page={page}"
@@ -24,9 +28,23 @@ CSV_HEADERS = [
     "operacion", "propiedad"
 ]
 
-# --------------------------------------------------------------------------------------
-# Utilidades de limpieza / normalización (idénticas a tu script original)
-# --------------------------------------------------------------------------------------
+# User-Agent normal (evita "HeadlessChrome")
+NORMAL_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
+
+# Lee proxy de entorno si está definido (formato Decodo: host:port:user:pass)
+ENV_PROXY = os.getenv("PROXY_URL")  # ejemplo: "pa.decodo.com:20001:USER:PASS"
+
+
+# ==========================
+# Helpers de limpieza/parseo
+# ==========================
+
+def norm_space(s):
+    return re.sub(r"\s+", " ", s or "").strip()
 
 def detect_moneda(precio_text):
     t = (precio_text or "").lower()
@@ -37,9 +55,6 @@ def detect_moneda(precio_text):
     if "€" in t or "eur" in t:
         return "EUR"
     return ""
-
-def norm_space(s):
-    return re.sub(r"\s+", " ", s or "").strip()
 
 def clean_precio(precio_text):
     match = re.search(r'[\d\.,]+', precio_text or "")
@@ -95,7 +110,6 @@ def extract_operacion_propiedad(href_path):
     return operacion, propiedad
 
 def get_details_list_texts(tile):
-    # Usamos lxml como antes (page_source -> lxml.html)
     lis = tile.xpath('.//ul[contains(@class,"d3-ad-tile__details")]/li')
     texts = [norm_space(li.xpath('string(.)')) for li in lis]
     return texts
@@ -136,61 +150,124 @@ def parse_tile(tile):
         "propiedad": propiedad,
     }
 
-# --------------------------------------------------------------------------------------
-# Selenium setup
-# --------------------------------------------------------------------------------------
 
-DEFAULT_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0 Safari/537.36"
-)
+# ==========================
+# Selenium + Proxy Decodo
+# ==========================
 
-def make_driver(headless=True, user_agent=DEFAULT_UA, proxy=None):
+def _build_proxy_extension_for_auth(host, port, user, password, pluginfile="proxy_auth_plugin.zip"):
+    """Crea extensión de Chrome para configurar proxy con AUTH (http) y evitar prompt de login."""
+    manifest_json = """
+    {
+        "version": "1.0.0",
+        "manifest_version": 2,
+        "name": "Chrome Proxy",
+        "permissions": [
+            "proxy",
+            "tabs",
+            "unlimitedStorage",
+            "storage",
+            "<all_urls>",
+            "webRequest",
+            "webRequestBlocking"
+        ],
+        "background": { "scripts": ["background.js"] }
+    }"""
+
+    background_js = f"""
+    var config = {{
+        mode: "fixed_servers",
+        rules: {{
+            singleProxy: {{
+                scheme: "http",
+                host: "{host}",
+                port: parseInt({port})
+            }},
+            bypassList: ["localhost"]
+        }}
+    }};
+    chrome.proxy.settings.set({{value: config, scope: "regular"}}, function(){{}});
+    function callbackFn(details) {{
+        return {{
+            authCredentials: {{
+                username: "{user}",
+                password: "{password}"
+            }}
+        }};
+    }}
+    chrome.webRequest.onAuthRequired.addListener(
+        callbackFn,
+        {{urls: ["<all_urls>"]}},
+        ["blocking"]
+    );
     """
-    Crea y devuelve un Chrome headless (o visible) con opciones razonables.
-    - Si pasas proxy="http://user:pass@host:port" lo aplica.
+
+    with zipfile.ZipFile(pluginfile, 'w') as zp:
+        zp.writestr("manifest.json", manifest_json)
+        zp.writestr("background.js", background_js)
+
+    return pluginfile
+
+
+def make_driver(headless=True, user_agent=NORMAL_UA, proxy_str=ENV_PROXY):
     """
-    opts = Options()
+    Arranca Chrome stealth (undetected-chromedriver).
+    - proxy_str (opcional): "host:port:user:pass" (formato Decodo)
+    """
+    options = ChromeOptions()
     if headless:
-        opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument(f"--user-agent={user_agent}")
-    opts.add_argument("--lang=es-ES,es;q=0.9,en;q=0.8")
-    if proxy:
-        opts.add_argument(f"--proxy-server={proxy}")
+        options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--lang=es-ES,es;q=0.9,en;q=0.8")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    if user_agent:
+        options.add_argument(f"--user-agent={user_agent}")
 
-    # Importante para algunos hostings/containers con poca memoria compartida
-    # y para evitar bloqueos por automation flags
-    opts.add_argument("--disable-blink-features=AutomationControlled")
+    # Proxy con auth:
+    if proxy_str:
+        try:
+            host, port, user, password = proxy_str.split(":")
+            # Importante: no usamos --proxy-server con user:pass porque Chrome pediría prompt.
+            # En su lugar, cargamos una extensión que configura el proxy y envía auth.
+            pluginfile = _build_proxy_extension_for_auth(host, port, user, password)
+            options.add_extension(pluginfile)
+        except Exception as e:
+            print(f"[Proxy] formato inválido '{proxy_str}': {e}. Continuando sin proxy.")
+            proxy_str = None
 
-    driver = webdriver.Chrome(options=opts)
-    driver.set_page_load_timeout(40)
+    driver = uc.Chrome(options=options, headless=headless)
+    driver.set_page_load_timeout(60)
     return driver
 
-def wait_for_listings(driver, timeout=30):
-    """
-    Espera a que cargue el contenedor #currentlistings y al menos un tile.
-    """
+
+# ==========================
+# Utilidades Selenium/Red
+# ==========================
+
+def wait_ready(driver, timeout=40):
     WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "#currentlistings"))
-    )
-    WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "#currentlistings .d3-ad-tile"))
+        lambda d: d.execute_script("return document.readyState") == "complete"
     )
 
-def smart_scroll(driver, steps=4, pause=0.8):
-    """
-    Scrollea para disparar lazyloads si fuera necesario.
-    """
+def try_accept_cookies(driver):
+    # Fallback genérico por texto (no CSS :contains)
+    try:
+        driver.execute_script("""
+            const btns = [...document.querySelectorAll('button,a')];
+            const b = btns.find(x => x.textContent.trim().toLowerCase().includes('acept'));
+            if (b) b.click();
+        """)
+    except:
+        pass
+
+def smart_scroll(driver, steps=3, pause=0.7):
     for _ in range(steps):
         driver.execute_script("window.scrollBy(0, document.body.scrollHeight/2);")
         time.sleep(pause)
 
 def dump_debug(driver, page):
-    """Guarda el HTML actual de Selenium para inspección manual."""
     try:
         with open(f"/app/debug_p{page}.html", "w", encoding="utf-8") as f:
             f.write(driver.page_source)
@@ -198,124 +275,126 @@ def dump_debug(driver, page):
     except Exception as e:
         print("No pude guardar dump:", e)
 
-def make_driver(headless=True, user_agent=None, proxy=None):
-    opts = Options()
-    if headless:
-        opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_argument("--lang=es-ES,es;q=0.9,en;q=0.8")
+def _proxy_url_http_from_decodo(proxy_str):
+    """Convierte 'host:port:user:pass' → 'http://user:pass@host:port' para requests."""
+    host, port, user, password = proxy_str.split(":")
+    return f"http://{user}:{password}@{host}:{port}"
 
-    if user_agent:
-        opts.add_argument(f"--user-agent={user_agent}")
-    if proxy:
-        opts.add_argument(f"--proxy-server={proxy}")
-
-    # 1) Si estamos en Docker Linux con chromedriver del sistema, úsalo
-    chromedriver_bin = os.getenv("CHROMEDRIVER_BIN", "/usr/bin/chromedriver")
-    if os.path.isfile(chromedriver_bin):
-        service = Service(chromedriver_bin)
-        driver = webdriver.Chrome(service=service, options=opts)
-        driver.set_page_load_timeout(40)
-        return driver
-
-    # 2) Intento estándar (Selenium Manager) – en macOS suele bastar
-    try:
-        driver = webdriver.Chrome(options=opts)
-        driver.set_page_load_timeout(40)
-        return driver
-    except Exception as e1:
-        print("Selenium Manager falló:", e1)
-
-    # 3) Fallback con webdriver-manager (descarga el driver compatible)
-    try:
-        from webdriver_manager.chrome import ChromeDriverManager
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=opts)
-        driver.set_page_load_timeout(40)
-        return driver
-    except Exception as e2:
-        raise RuntimeError(
-            f"No se pudo inicializar ChromeDriver ni con Selenium Manager ni con webdriver-manager. "
-            f"Detalles:\n- Selenium Manager: {e1}\n- webdriver-manager: {e2}"
-        )
-# --------------------------------------------------------------------------------------
-# Scraper con Selenium
-# --------------------------------------------------------------------------------------
-
-def scrape_profile(user_id, delay=1.0, max_pages=200):
-    all_rows = []
-    counter = 1
-    page = 1
-
-    driver = make_driver(headless=True)
-
-    while page <= max_pages:
-        url = PROFILE_URL_TMPL.format(user_id=user_id, page=page)
-        print(f"➡️ Página {page}: {url}")
-
+def requests_with_driver_cookies_get(driver, full_url, proxy_str=ENV_PROXY):
+    """GET con cookies del navegador + (opcional) proxy HTTP en requests."""
+    sess = requests.Session()
+    for c in driver.get_cookies():
+        sess.cookies.set(c["name"], c["value"], domain=c.get("domain"))
+    sess.headers.update({
+        "User-Agent": NORMAL_UA,
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+    })
+    if proxy_str:
         try:
-            driver.get(url)
-            time.sleep(2)  # deja que la página cargue JS
+            proxy_http = _proxy_url_http_from_decodo(proxy_str)
+            sess.proxies.update({"http": proxy_http, "https": proxy_http})
+        except:
+            pass
+    r = sess.get(full_url, timeout=40)
+    return r.text if r.status_code == 200 else ""
+
+def get_ajax_url_or_guess(driver, user_id, page):
+    """Primero intenta leer data-urlAjax; si no existe, hace guess a /user/ajax/..."""
+    try:
+        el = driver.find_element(By.CSS_SELECTOR, "#currentlistings")
+        path = el.get_attribute("data-urlAjax")
+        if path:
+            return urljoin(BASE, path.replace("{page}", str(page)))
+    except:
+        pass
+    guess = f"/costa-rica-es/user/ajax/id/{user_id}/page/{page}"
+    return urljoin(BASE, guess)
+
+
+# ==========================
+# SCRAPE PRINCIPAL
+# ==========================
+
+def scrape_profile(user_id, delay=1.2, max_pages=200, headless=True, proxy_str=ENV_PROXY):
+    """
+    Scrapea el perfil (paginado) de Encuentra24:
+    - Usa undetected-chromedriver (stealth)
+    - Acepta cookies, scroll, esperas
+    - Fallback AJAX con cookies si no hay #currentlistings
+    - Dump de HTML si hay bloqueo (Cloudflare)
+
+    Retorna: lista de dicts con anuncios
+    """
+    driver = make_driver(headless=headless, proxy_str=proxy_str)
+    all_rows, counter, page = [], 1, 1
+
+    try:
+        while page <= max_pages:
+            url = PROFILE_URL_TMPL.format(user_id=user_id, page=page)
+            print(f"➡️ Página {page}: {url}")
+
+            # Navegación con reintentos suaves
+            ok = False
+            for i in range(1, 4):
+                try:
+                    driver.get(url)
+                    ok = True
+                    break
+                except Exception as e:
+                    wait = 1.0 * i
+                    print(f"Intento {i}/3 falló al cargar {url}: {e}. Reintentando en {wait:.1f}s")
+                    time.sleep(wait)
+            if not ok:
+                dump_debug(driver, page)
+                print("⚠️ No se pudo cargar la página. Detengo.")
+                break
+
+            wait_ready(driver, 40)
+            try_accept_cookies(driver)
+            smart_scroll(driver, steps=3, pause=0.7)
+
+            # 1) Intento DOM renderizado
             doc = html.fromstring(driver.page_source)
-        except Exception as e:
-            print(f"⚠️ Error cargando {url}: {e}")
-            break
+            container = doc.xpath('//*[@id="currentlistings"]')
+            if container:
+                tiles = container[0].xpath('.//div[@data-tracklisting and contains(@class,"d3-ad-tile")]')
+            else:
+                tiles = []
 
-        container = doc.xpath('//*[@id="currentlistings"]')
-        if not container:
-            # Dump opcional para depurar
-            dump_debug(driver, page)  # si tienes esta función
-            print("⚠️ No se encontró #currentlistings. Detengo.")
-            break
+            # 2) Fallback AJAX si no hay tiles en DOM
+            if not tiles:
+                ajax_url = get_ajax_url_or_guess(driver, user_id, page)
+                html_ajax = requests_with_driver_cookies_get(driver, ajax_url, proxy_str=proxy_str)
+                if not html_ajax:
+                    dump_debug(driver, page)
+                    print("⚠️ No se encontró #currentlistings ni AJAX válido. Detengo.")
+                    break
+                doc = html.fromstring(html_ajax)
+                tiles = doc.xpath('.//div[@data-tracklisting and contains(@class,"d3-ad-tile")]')
 
-        container = container[0]
+            if not tiles:
+                dump_debug(driver, page)
+                print("✔️ Sin más anuncios o markup distinto. Fin.")
+                break
 
-        tiles = container.xpath('.//div[@data-tracklisting and contains(@class,"d3-ad-tile")]')
-        if not tiles:
-            print("✔️ Sin más anuncios en esta página. Fin.")
-            break
+            for tile in tiles:
+                row = parse_tile(tile)
+                row["id"] = counter
+                all_rows.append(row)
+                counter += 1
 
-        for tile in tiles:
-            row = parse_tile(tile)
-            row["id"] = counter
-            all_rows.append(row)
-            counter += 1
+            # Heurística de última página
+            if len(tiles) < 20:
+                print(f"✔️ Página {page} con {len(tiles)} anuncios (<20). Fin.")
+                break
 
-        if len(tiles) < 20:
-            print(f"✔️ Página {page} con {len(tiles)} anuncios (<20). Fin.")
-            break
+            page += 1
+            time.sleep(delay)
 
-        page += 1
-        time.sleep(delay)
+    finally:
+        try:
+            driver.quit()
+        except:
+            pass
 
-    driver.quit()
     return all_rows
-
-def save_csv(rows, filename="encuentra24_perfil.csv"):
-    with open(filename, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_HEADERS)
-        writer.writeheader()
-        for r in rows:
-            writer.writerow({
-                "id": r.get("id",""),
-                "titulo": r.get("titulo",""),
-                "ubicacion": r.get("ubicacion",""),
-                "descripcion": r.get("descripcion",""),
-                "link": r.get("link",""),
-                "precio": r.get("precio",""),
-                "moneda": r.get("moneda",""),
-                "area": r.get("area",""),
-                "habitaciones": r.get("habitaciones",""),
-                "banos": r.get("banos",""),
-                "operacion": r.get("operacion",""),
-                "propiedad": r.get("propiedad",""),
-            })
-    print(f"✅ CSV guardado: {filename}")
-
-if __name__ == "__main__":
-    USER_ID = 465250
-    rows = scrape_profile(USER_ID)
-    save_csv(rows, filename=f"enc24_{USER_ID}.csv")
